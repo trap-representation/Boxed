@@ -1,4 +1,4 @@
-(Currrently, filesystem-only) Work-in-progress sandbox for Linux Intel 64.
+(Currrently, filesystem-only) Work-in-progress syscall sandbox for Linux Intel 64.
 
 Development philosophy:
 - Tracee's memory must not be tampered with, unless absolutely necessary
