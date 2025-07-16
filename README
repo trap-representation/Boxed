@@ -1,7 +1,7 @@
 (Currrently, filesystem-only) Work-in-progress sandbox for Linux Intel 64.
 
 Development philosophy:
-- Tracee's memory is not tampered with, unless absolutely necessary
+- Tracee's memory must not be tampered with, unless absolutely necessary
 - Tracee shall not know it's being run in a sandboxed environment
 - Wherever possible, tracee's behavior in the sandbox must remain the same to how it works outside the sandbox
 
