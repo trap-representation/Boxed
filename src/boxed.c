@@ -1,6 +1,6 @@
 /*
-    Vigilante logs syscalls
-    Copyright (C) 2024  Somdipto Chakraborty
+    Boxed, a Linux Intel 64 sandbox
+    Copyright (C) 2025  Somdipto Chakraborty
 
     This program is free software: you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
