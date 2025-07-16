@@ -1,0 +1,9 @@
+(Currrently, filesystem-only) Work-in-progress sandbox for Linux Intel 64.
+
+Development philosophy:
+- Tracee's memory is not tampered with, unless absolutely necessary
+- Tracee shall not know it's being run in a sandboxed environment
+- Wherever possible, tracee's behavior in the sandbox must remain the same to how it works outside the sandbox
+
+How it works:
+For syscalls that use pathnames, safe ones are not written to the memory of the tracee before the syscall; instead, before the syscall entry, the syscall itself is changed (currently to GETPID, since it does not affect anything besides RAX) and the tracer runs the syscall the tracee was supposed to with safe filepaths. The tracee simply executes the changed syscall, and at the syscall exit, the tracer sets the registers and memory of the tracee to reflect the result of the original syscall.
