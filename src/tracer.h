@@ -17,6 +17,11 @@ struct descs_s {
   } lock;
   pid_t openedby;
 };
+
+enum state_e {
+  STATE_ENTRY,
+  STATE_EXIT
+};
   
 enum error_e trace(pid_t tracee, _Bool is_root_proc, struct descs_s *parent_desc);
 

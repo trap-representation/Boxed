@@ -25,11 +25,6 @@
 
 #define SYSRET(arg, err) err = arg; if (err == -1) err = -errno;
 
-enum state_e {
-  STATE_ENTRY,
-  STATE_EXIT
-};
-
 struct descs_s *dp = NULL;
 
 /* *_descs functions need to be rewritten for improved efficiency,
@@ -140,7 +135,7 @@ static enum error_e wait_syscall(pid_t tracee) {
   return ERR_SUCCESS;
 }
 
-static enum error_e set(struct user_regs_struct user_regs, pid_t tracee) {
+static enum error_e set_regs(struct user_regs_struct user_regs, pid_t tracee) {
   if (ptrace(PTRACE_SETREGS, tracee, NULL, &user_regs) == -1) {
     return ERR_PTRACE_SETREGS;
   }
@@ -637,7 +632,7 @@ static int sbx_newfstatat(int dfd, char *filename, struct stat *statbuf, int fla
 
 static enum error_e setnoop(struct user_regs_struct user_regs, pid_t tracee) {
   user_regs.orig_rax = GETPID;
-  IFBAD_RETURN(set(user_regs, tracee));
+  IFBAD_RETURN(set_regs(user_regs, tracee));
   return ERR_SUCCESS;
 }
 
@@ -785,7 +780,7 @@ static enum error_e _trace(unsigned long long int sc, struct user_regs_struct us
     case READ: case WRITE: case OPEN: case CLOSE: case STAT: case FSTAT: case LSTAT: case POLL: case OPENAT: case NEWFSTATAT:
       {
 	user_regs.rax = last_ret;
-	IFBAD_RETURN(set(user_regs, tracee));
+	IFBAD_RETURN(set_regs(user_regs, tracee));
 	break;
       }
     }
