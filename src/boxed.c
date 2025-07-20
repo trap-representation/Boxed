@@ -47,6 +47,6 @@ int main(int argc, char *argv[]) {
     return ERR_EXECVP;
   }
   else {
-    return trace(tracee);
+    return trace(tracee, 1, NULL);
   }
 }

@@ -1,5 +1,6 @@
 #define _GNU_SOURCE
 
+#include "btypes.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -7,44 +8,50 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/types.h>
+#include <linux/types.h>
 #include <sys/user.h>
 #include <sys/stat.h>
 #include <linux/limits.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <poll.h>
+#include <errno.h>
 
 #include "tracer.h"
 #include "syscalls.h"
 #include "config.h"
-#include "btypes.h"
 
-#define IFBAD_RETURN(arg) { enum error _err = arg; if (_err != ERR_SUCCESS) return _err; }
+#define IFBAD_RETURN(arg) { enum error_e _err = arg; if (_err != ERR_SUCCESS) return _err; }
 
-enum state {
+#define SYSRET(arg, err) err = arg; if (err == -1) err = -errno;
+
+enum state_e {
   STATE_ENTRY,
   STATE_EXIT
 };
 
-struct descs {
-  int val;
-  int eval;
-  char *iden;
-  mode_t mode;
-} *dp;
+struct descs_s *dp = NULL;
 
-/* *_descs functions need to be rewritten for improved efficiency;
+/* *_descs functions need to be rewritten for improved efficiency,
    but these should do it for now */
 
-static enum error init_descs(void) {
-  if ((dp = malloc(MAX_DESCS * sizeof(*dp))) == NULL) {
+static enum error_e init_descs(struct descs_s **dsc, struct descs_s *from, pid_t tracee) {
+  if ((*dsc = malloc(MAX_DESCS * sizeof(**dsc))) == NULL) {
     return ERR_MALLOC;
   }
 
-  for (size_t i = 0; i < MAX_DESCS; i++) {
-    dp[i].val = -1;
-    dp[i].eval = -1;
-    dp[i].iden = NULL;
-    dp[i].mode = 0;
+  if (from == NULL) {
+    for (size_t i = 0; i < MAX_DESCS; i++) {
+      (*dsc)[i].val = -1;
+      (*dsc)[i].eval = -1;
+      (*dsc)[i].iden = NULL;
+      (*dsc)[i].mode = 0;
+      (*dsc)[i].lock = (struct lock_s) {0, 0, 0, 0};
+      (*dsc)[i].openedby = tracee;
+    }
+  }
+  else {
+    memcpy(*dsc, from, MAX_DESCS * sizeof(**dsc));
   }
 
   return ERR_SUCCESS;
@@ -60,7 +67,7 @@ static ssize_t search_in_descs(int d) {
   return -1;
 }
 
-static enum error add_to_descs(char *name, int d, mode_t mode, int ed) {
+static enum error_e add_to_descs(char *name, int d, mode_t mode, int ed) {
   for (size_t i = 0; i < MAX_DESCS; i++) {
     if (dp[i].val == -1) {
       if ((dp[i].iden = malloc(strlen(name))) == NULL) {
@@ -78,27 +85,33 @@ static enum error add_to_descs(char *name, int d, mode_t mode, int ed) {
   return ERR_FILLED_DESCS;
 }
 
-static void del_from_descs(size_t d) {
+static void del_from_descs(size_t d, pid_t tracee) {
   ssize_t l = search_in_descs(d);
 
   if (l == -1) return;
 
-  dp[l].val = -1;
+  if (dp[l].openedby == tracee) {
+    dp[l].val = -1;
 
-  free(dp[l].iden);
-  dp[l].iden = NULL;
+    free(dp[l].iden);
+    dp[l].iden = NULL;
 
-  dp[l].mode = 0;
-}
-
-static void clean_descs(void) {
-  for (size_t i = 0; i < MAX_DESCS; i++) {
-    close(dp[i].eval);
-    free(dp[i].iden);
+    dp[l].mode = 0;
   }
 }
 
-static enum error wait_syscall(pid_t tracee) {
+static void clean_descs(pid_t tracee) {
+  if (dp) {
+    for (size_t i = 0; i < MAX_DESCS; i++) {
+      if (dp[i].openedby == tracee) {
+	close(dp[i].eval);
+	free(dp[i].iden);
+      }
+    }
+  }
+}
+
+static enum error_e wait_syscall(pid_t tracee) {
   if (ptrace(PTRACE_SYSCALL, tracee, NULL, NULL) == -1) {
     return ERR_PTRACE_SYSCALL;
   }
@@ -111,14 +124,23 @@ static enum error wait_syscall(pid_t tracee) {
   if (WIFEXITED(wstatus)) {
     return ERR_TERMINATED;
   }
-  else if(WIFSIGNALED(wstatus)) {
+  else if (WIFSIGNALED(wstatus)) {
     return ERR_KILLED;
+  }
+  else if (wstatus >> 8 == (SIGTRAP | (PTRACE_EVENT_FORK << 8))) {
+    return ERR_EFORK;
+  }
+  else if (wstatus >> 8 == (SIGTRAP | (PTRACE_EVENT_CLONE << 8))) {
+    return ERR_ECLONE;
+  }
+  else if (wstatus >> 8 == (SIGTRAP | (PTRACE_EVENT_VFORK << 8))) {
+    return ERR_EVFORK;
   }
 
   return ERR_SUCCESS;
 }
 
-static enum error set(struct user_regs_struct user_regs, pid_t tracee) {
+static enum error_e set(struct user_regs_struct user_regs, pid_t tracee) {
   if (ptrace(PTRACE_SETREGS, tracee, NULL, &user_regs) == -1) {
     return ERR_PTRACE_SETREGS;
   }
@@ -153,7 +175,7 @@ static void *get_text(void *addr, size_t len, pid_t tracee) {
     size_t at;
 
     for (at = 0; at <= len - (len % sizeof(WORD)) /* align
-						    backwards */
+						     backwards */
 	   - sizeof(WORD) /* subtract sizeof(WORD) as we are reading
 			     sizeof(WORD) bytes at a time */; at += sizeof(WORD)) {
       WORD s = ptrace(PTRACE_PEEKTEXT, tracee, (char *) addr + at, NULL);
@@ -207,7 +229,7 @@ static void *get_ntext(void *addr, pid_t tracee) {
   }
 }
 
-static enum error write_to_tracee(void *b, size_t bsz, void *addr, pid_t tracee) {
+static enum error_e write_to_tracee(void *b, size_t bsz, void *addr, pid_t tracee) {
   if (bsz < sizeof(WORD)) {
     WORD s = ptrace(PTRACE_PEEKTEXT, tracee, addr, NULL);
 
@@ -252,6 +274,7 @@ static _Bool is_dir(int dfd) {
   if ((dl = search_in_descs(dfd)) == -1) {
     return -1;
   }
+
   struct stat st;
   if (stat(dp[dl].iden, &st) == -1) {
     return -1;
@@ -264,7 +287,7 @@ static _Bool is_dir(int dfd) {
   return 1;
 }
 
-static int get_epath(int fd) {
+static int get_efd(int fd) {
   int efd = search_in_descs(fd);
   if (efd == -1) {
     return -1;
@@ -357,63 +380,89 @@ static char *get_sbxpath(char *filename, int dfd) {
   return sbxpath;
 }
 
-static int sbx_openat(int dfd, char *filename, int flags, mode_t mode) {
-  if (!is_dir(dfd) && dfd != AT_FDCWD) {
-    return -1;
-  }
-
+static int sbx_openat(int dfd, char *filename, int flags, umode_t mode) {
+  int r;
   char *sbxpath;
-  if ((sbxpath = get_sbxpath(filename, dfd)) == NULL) {
-    return -1;
+
+  if (flags & AT_EMPTY_PATH && filename[0] == '\0') {
+    if (!is_open(dfd)) {
+      return -EBADF;
+    }
+
+    sbxpath = dp[search_in_descs(dfd)].iden;
+
+    SYSRET(openat(get_efd(dfd), "", flags, mode), r);
+  }
+  else {
+    if (filename[0] != '/' && dfd != AT_FDCWD) {
+      if (!is_open(dfd)) {
+	return -EBADF;
+      }
+
+      if (!is_dir(dfd)) {
+	return -ENOTDIR;
+      }
+    }
+
+    if (filename[0] == '/') dfd = -1;
+
+    if ((sbxpath = get_sbxpath(filename, dfd)) == NULL) {
+      return -ENOMEM;
+    }
+
+    SYSRET(openat(AT_FDCWD, sbxpath, flags, mode), r);
   }
 
-  int r = open(sbxpath, flags, mode);
-
-  free(sbxpath);
-
-  IFBAD_RETURN(add_to_descs(sbxpath, r, mode, r));
+  if (add_to_descs(sbxpath, r, mode, r) != ERR_SUCCESS) {
+    return -ENOMEM;
+  }
 
   return r;
 }
 
-static int sbx_open(char *filename, int flags, mode_t mode) {
+static int sbx_open(char *filename, int flags, umode_t mode) {
   char *sbxpath;
   if ((sbxpath = get_sbxpath(filename, -1)) == NULL) {
-    return -1;
+    return -ENOMEM;
   }
 
-  int r = open(sbxpath, flags, mode);
+  int r;
+  SYSRET(open(sbxpath, flags, mode), r);
 
   free(sbxpath);
 
-  IFBAD_RETURN(add_to_descs(sbxpath, r, mode, r));
+  if (add_to_descs(sbxpath, r, mode, r) != ERR_SUCCESS) {
+    return -ENOMEM;
+  }
 
   return r;
 }
 
-static int sbx_read(unsigned int fd, void *buf, size_t count, pid_t tracee) {
+static int sbx_read(unsigned int fd, char *buf, size_t count, pid_t tracee) {
   if (!is_open(fd)) {
-    return -1;
+    return -EBADF;
   }
 
   char *b = malloc(count);
   if (b == NULL) {
-    return -1;
+    return -EIO;
   }
 
   int r;
-  if ((r = read(get_epath(fd), b, count)) == -1) {
-    return -1;
+  SYSRET(read(get_efd(fd), b, count), r);
+
+  if (r < 0) {
+    return r;
   }
 
   if (write_to_tracee(b, r, buf, tracee) != ERR_SUCCESS) {
-    return -1;
+    return -EIO;
   }
 
   return r;
 }
 
-static int sbx_write(unsigned int fd, void *buf, size_t count, pid_t tracee) {
+static int sbx_write(unsigned int fd, char *buf, size_t count, pid_t tracee) {
   if (!is_open(fd)) {
     return -1;
   }
@@ -421,22 +470,27 @@ static int sbx_write(unsigned int fd, void *buf, size_t count, pid_t tracee) {
   char *text = get_text(buf, count, tracee);
 
   if (text == NULL) {
-    return -1;
+    return -EIO;
   }
 
-  int r =  write(get_epath(fd), text, count);
+  int r;
+  SYSRET(write(get_efd(fd), text, count), r);
+
+  if (r < 0) {
+    return r;
+  }
 
   free(text);
 
   return r;
 }
 
-static int sbx_close(unsigned int fd) {
+static int sbx_close(unsigned int fd, pid_t tracee) {
   if (!is_open(fd)) {
-    return -1;
+    return -EBADF;
   }
 
-  del_from_descs(fd);
+  del_from_descs(fd, tracee);
 
   if (fd == 0 || fd == 1 || fd == 2) { /* we cannot close these
 					  because we are using them;
@@ -444,24 +498,97 @@ static int sbx_close(unsigned int fd) {
     return 0;
   }
   else {
-    return close(fd);
+    int r;
+    SYSRET(close(fd), r);
+    return r;
   }
 }
 
-static int sbx_stat(char *filename, struct stat *statbuf, pid_t tracee) {
-  char *sbxpath;
-  if ((sbxpath = get_sbxpath(filename, -1)) == NULL) {
-    return -1;
+static int sbx_fstat(unsigned int fd, struct __old_kernel_stat *statbuf, pid_t tracee) {
+  if (!is_open(fd)) {
+    return -EBADF;
   }
 
   struct stat b;
-  int r = stat(sbxpath, &b);
+  int r;
+  SYSRET(fstat(get_efd(fd), &b), r);
+
+  if (write_to_tracee(&b, sizeof(b), statbuf, tracee) != ERR_SUCCESS) {
+    return -EFAULT;
+  }
+
+  return r;
+}
+
+static int sbx_lstat(char *filename, struct __old_kernel_stat *statbuf, pid_t tracee) {
+  char *sbxpath;
+  if ((sbxpath = get_sbxpath(filename, -1)) == NULL) {
+    return -ENOMEM;
+  }
+
+  struct stat b;
+  int r;
+  SYSRET(lstat(sbxpath, &b), r);
 
   free(sbxpath);
 
   if (write_to_tracee(&b, sizeof(b), statbuf, tracee) != ERR_SUCCESS) {
-    return -1;
+    return -EFAULT;
   }
+
+  return r;
+}
+
+static int sbx_stat(char *filename, struct __old_kernel_stat *statbuf, pid_t tracee) {
+  char *sbxpath;
+  if ((sbxpath = get_sbxpath(filename, -1)) == NULL) {
+    return -ENOMEM;
+  }
+
+  struct stat b;
+  int r;
+  SYSRET(stat(sbxpath, &b), r);
+
+  free(sbxpath);
+
+  if (write_to_tracee(&b, sizeof(b), statbuf, tracee) != ERR_SUCCESS) {
+    return -EFAULT;
+  }
+
+  return r;
+}
+
+static int sbx_poll(struct pollfd *ufds, unsigned int nfds, long timeout_msecs, pid_t tracee) {
+  struct pollfd *fds = get_text(ufds, nfds * sizeof(*ufds), tracee);
+
+  if (fds == NULL) {
+    return -ENOMEM;
+  }
+
+  for (unsigned int i = 0; i < nfds; i++) {
+    fds[i].fd = get_efd(fds[i].fd);
+  }
+
+  int r;
+  SYSRET(poll(fds, nfds, timeout_msecs), r);
+
+  if (write_to_tracee(fds, nfds * sizeof(*ufds), ufds, tracee)) {
+    free(fds);
+    return -EFAULT;
+  }
+
+  free(fds);
+
+  return r;
+}
+
+static int sbx_lseek(unsigned int fd, off_t offset, unsigned int whence) {
+  if (!is_open(fd)) {
+    return -EBADF;
+  }
+
+  int r;
+  SYSRET(lseek(get_efd(fd), offset, whence), r);
 
   return r;
 }
@@ -472,41 +599,49 @@ static int sbx_newfstatat(int dfd, char *filename, struct stat *statbuf, int fla
 
   if (flag & AT_EMPTY_PATH && filename[0] == '\0') {
     if (!is_open(dfd)) {
-      return -1;
+      return -EBADF;
     }
 
-    r = fstatat(get_epath(dfd), "", &b, flag);
+    SYSRET(fstatat(get_efd(dfd), "", &b, flag), r);
   }
   else {
     char *sbxpath;
 
-    if (!is_dir(dfd) && dfd != AT_FDCWD) {
-      return -1;
+    if (filename[0] != '/' && dfd != AT_FDCWD) {
+      if (!is_open(dfd)) {
+	return -EBADF;
+      }
+
+      if (!is_dir(dfd)) {
+	return -ENOTDIR;
+      }
     }
+
+    if (filename[0] == '/') dfd = -1;
 
     if ((sbxpath = get_sbxpath(filename, dfd)) == NULL) {
       return -1;
     }
 
-    r = fstatat(AT_FDCWD, sbxpath, &b, flag);
+    SYSRET(fstatat(AT_FDCWD, sbxpath, &b, flag), r);
 
     free(sbxpath);
   }
 
   if (write_to_tracee(&b, sizeof(b), statbuf, tracee) != ERR_SUCCESS) {
-    return -1;
+    return -EFAULT;
   }
 
   return r;
 }
 
-static enum error setnoop(struct user_regs_struct user_regs, pid_t tracee) {
+static enum error_e setnoop(struct user_regs_struct user_regs, pid_t tracee) {
   user_regs.orig_rax = GETPID;
   IFBAD_RETURN(set(user_regs, tracee));
   return ERR_SUCCESS;
 }
 
-static enum error _trace(unsigned long long int sc, struct user_regs_struct user_regs, pid_t tracee, enum state st) {
+static enum error_e _trace(unsigned long long int sc, struct user_regs_struct user_regs, pid_t tracee, enum state_e st) {
   static unsigned long long int last_ret;
 
   if (st == STATE_ENTRY) {
@@ -531,7 +666,7 @@ static enum error _trace(unsigned long long int sc, struct user_regs_struct user
       {
 	IFBAD_RETURN(setnoop(user_regs, tracee));
 
-	last_ret = sbx_read(user_regs.rdi, (void *) user_regs.rsi, user_regs.rdx, tracee);
+	last_ret = sbx_read(user_regs.rdi, (char *) user_regs.rsi, user_regs.rdx, tracee);
 
 	break;
       }
@@ -540,7 +675,7 @@ static enum error _trace(unsigned long long int sc, struct user_regs_struct user
       {
 	IFBAD_RETURN(setnoop(user_regs, tracee));
 
-	last_ret = sbx_write(user_regs.rdi, (void *) user_regs.rsi, user_regs.rdx, tracee);
+	last_ret = sbx_write(user_regs.rdi, (char *) user_regs.rsi, user_regs.rdx, tracee);
 
 	break;
       }
@@ -565,7 +700,7 @@ static enum error _trace(unsigned long long int sc, struct user_regs_struct user
       {
 	IFBAD_RETURN(setnoop(user_regs, tracee));
 
-	last_ret = sbx_close(user_regs.rdi);
+	last_ret = sbx_close(user_regs.rdi, tracee);
 
 	break;
       }
@@ -579,9 +714,51 @@ static enum error _trace(unsigned long long int sc, struct user_regs_struct user
 	  return ERR_PTRACE_PEEKTEXT;
 	}
 
-	last_ret = sbx_stat(filename, (struct stat *) user_regs.rsi, tracee);
+	last_ret = sbx_stat(filename, (struct __old_kernel_stat *) user_regs.rsi, tracee);
 
 	free(filename);
+
+	break;
+      }
+
+    case FSTAT:
+      {
+	IFBAD_RETURN(setnoop(user_regs, tracee));
+
+	last_ret = sbx_fstat(user_regs.rdi, (struct __old_kernel_stat *) user_regs.rsi, tracee);
+
+	break;
+      }
+
+    
+    case LSTAT:
+      {
+	IFBAD_RETURN(setnoop(user_regs, tracee));
+
+	char *filename = get_ntext((void *) user_regs.rdi, tracee);
+	if (filename == NULL) {
+	  return ERR_PTRACE_PEEKTEXT;
+	}
+
+	last_ret = sbx_lstat(filename, (struct __old_kernel_stat *) user_regs.rsi, tracee);
+
+	free(filename);
+
+	break;
+      }
+
+    case POLL:
+      {
+	last_ret = sbx_poll((struct pollfd *) user_regs.rdi, user_regs.rsi, user_regs.rdx, tracee);
+
+	break;
+      }
+
+    case LSEEK:
+      {
+	IFBAD_RETURN(setnoop(user_regs, tracee));
+
+	last_ret = sbx_lseek(user_regs.rdi, user_regs.rsi, user_regs.rdx);
 
 	break;
       }
@@ -605,7 +782,7 @@ static enum error _trace(unsigned long long int sc, struct user_regs_struct user
   }
   else {
     switch (sc) {
-    case READ: case OPENAT: case WRITE: case OPEN: case CLOSE: case STAT: case NEWFSTATAT:
+    case READ: case WRITE: case OPEN: case CLOSE: case STAT: case FSTAT: case LSTAT: case POLL: case OPENAT: case NEWFSTATAT:
       {
 	user_regs.rax = last_ret;
 	IFBAD_RETURN(set(user_regs, tracee));
@@ -617,34 +794,41 @@ static enum error _trace(unsigned long long int sc, struct user_regs_struct user
   return ERR_SUCCESS;
 }
 
-enum error trace(pid_t tracee) {
+enum error_e trace(pid_t tracee, _Bool is_root_proc, struct descs_s *parent_desc) {
+  struct descs_s *dsc;
+
   if (waitpid(tracee, NULL, 0) == -1) {
     return ERR_WAITPID;
   }
-  if (ptrace(PTRACE_SETOPTIONS, tracee, 0, PTRACE_O_EXITKILL) == -1) {
+  if (ptrace(PTRACE_SETOPTIONS, tracee, 0, PTRACE_O_EXITKILL | PTRACE_O_TRACEFORK | PTRACE_O_TRACECLONE | PTRACE_O_TRACEVFORK) == -1) {
     return ERR_PTRACE_SETOPTIONS;
   }
 
-  enum error r;
+  enum error_e r;
 
-  IFBAD_RETURN(init_descs());
+  IFBAD_RETURN(init_descs(&dsc, parent_desc, tracee));
+  dp = dsc;
 
-  /* isolate stdin, stdout, and stderr for the tracee */
-  int eval = open("sbx/proc/self/fd/0", O_RDONLY);
-  if (eval == -1) { r = ERR_OPENSTDIN; goto cleanup; }
-  r = add_to_descs("sbx/proc/self/fd/0", 0, O_RDONLY, eval);
-  if (r) goto cleanup;
+  /* children inherit opened fds from the parent, so we don't need to
+     open these fds if the tracee is not the root process */
+  if (is_root_proc) {
+    /* isolate stdin, stdout, and stderr for the tracee */
+    int eval = open("sbx/proc/self/fd/0", O_RDONLY);
+    if (eval == -1) { r = ERR_OPENSTDIN; goto cleanup; }
+    r = add_to_descs("sbx/proc/self/fd/0", 0, O_RDONLY, eval);
+    if (r) goto cleanup;
 
-  eval = open("sbx/proc/self/fd/1", O_WRONLY);
-  if (eval == -1) { r = ERR_OPENSTDOUT; goto cleanup; }
+    eval = open("sbx/proc/self/fd/1", O_WRONLY);
+    if (eval == -1) { r = ERR_OPENSTDOUT; goto cleanup; }
   
-  r = add_to_descs("sbx/proc/self/fd/1", 1, O_WRONLY, eval);
-  if (r) goto cleanup;
+    r = add_to_descs("sbx/proc/self/fd/1", 1, O_WRONLY, eval);
+    if (r) goto cleanup;
 
-  eval = open("sbx/proc/self/fd/2", O_RDONLY);
-  if (eval == -1) { r = ERR_OPENSTDERR; goto cleanup; }
-  r = add_to_descs("sbx/proc/self/fd/2", 2, O_WRONLY, eval);
-  if (r) goto cleanup;
+    eval = open("sbx/proc/self/fd/2", O_WRONLY);
+    if (eval == -1) { r = ERR_OPENSTDERR; goto cleanup; }
+    r = add_to_descs("sbx/proc/self/fd/2", 2, O_WRONLY, eval);
+    if (r) goto cleanup;
+  }
 
   while (1) {
     /* syscall entry */
@@ -672,19 +856,32 @@ enum error trace(pid_t tracee) {
     if (r == ERR_WAITPID || r == ERR_TERMINATED) {
       goto cleanup;
     }
+    else if (r == ERR_EFORK || r == ERR_EVFORK || r == ERR_ECLONE) {
+      long ch_tracee;
 
-    if (ptrace(PTRACE_GETREGS, tracee, NULL, &user_regs) == -1) {
-      r = ERR_PTRACE_GETREGS;
-      goto cleanup;
+      if (ptrace(PTRACE_GETEVENTMSG, tracee, NULL, &ch_tracee) == -1) {
+	r = ERR_PTRACE_GETEVENTMSG;
+	goto cleanup;
+      }
+
+      trace(ch_tracee, 0, dsc);
+
+      dp = dsc;
     }
+    else {
+      if (ptrace(PTRACE_GETREGS, tracee, NULL, &user_regs) == -1) {
+	r = ERR_PTRACE_GETREGS;
+	goto cleanup;
+      }
 
-    r = _trace(sc, user_regs, tracee, STATE_EXIT);
+      r = _trace(sc, user_regs, tracee, STATE_EXIT);
 
-    if (r) goto cleanup;
+      if (r) goto cleanup;
+    }
   }
 
  cleanup:
-  clean_descs();
+  clean_descs(tracee);
 
   return r;
 }
