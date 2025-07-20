@@ -42,6 +42,7 @@ static enum error_e init_descs(struct descs_s **dsc, struct descs_s *from, pid_t
       (*dsc)[i].iden = NULL;
       (*dsc)[i].mode = 0;
       (*dsc)[i].lock = (struct lock_s) {0, 0, 0, 0};
+      (*dsc)[i].seal = (struct seal_s) {0, 0};
       (*dsc)[i].openedby = tracee;
     }
   }

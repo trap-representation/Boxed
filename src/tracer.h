@@ -15,6 +15,10 @@ struct descs_s {
     off_t size;
     pid_t by;
   } lock;
+  struct seal_s {
+    _Bool status;
+    int flags;
+  } seal;
   pid_t openedby;
 };
 
