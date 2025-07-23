@@ -63,7 +63,7 @@ static ssize_t search_in_descs(int d) {
   return -1;
 }
 
-static enum error_e add_to_descs(char *name, int d, mode_t mode, int ed) {
+static enum error_e add_to_descs(char *name, int d, mode_t mode, int ed, pid_t tracee) {
   for (size_t i = 0; i < MAX_DESCS; i++) {
     if (dp[i].val == -1) {
       if ((dp[i].iden = malloc(strlen(name))) == NULL) {
@@ -74,6 +74,7 @@ static enum error_e add_to_descs(char *name, int d, mode_t mode, int ed) {
       dp[i].val = d;
       dp[i].eval = ed;
       dp[i].mode = mode;
+      dp[i].openedby = tracee;
       return ERR_SUCCESS;
     }
   }
@@ -376,7 +377,7 @@ static char *get_sbxpath(char *filename, int dfd) {
   return sbxpath;
 }
 
-static int sbx_openat(int dfd, char *filename, int flags, umode_t mode) {
+static int sbx_openat(int dfd, char *filename, int flags, umode_t mode, pid_t tracee) {
   int r;
   char *sbxpath;
 
@@ -409,14 +410,14 @@ static int sbx_openat(int dfd, char *filename, int flags, umode_t mode) {
     SYSRET(openat(AT_FDCWD, sbxpath, flags, mode), r);
   }
 
-  if (add_to_descs(sbxpath, r, mode, r) != ERR_SUCCESS) {
+  if (add_to_descs(sbxpath, r, mode, r, tracee) != ERR_SUCCESS) {
     return -ENOMEM;
   }
 
   return r;
 }
 
-static int sbx_open(char *filename, int flags, umode_t mode) {
+static int sbx_open(char *filename, int flags, umode_t mode, pid_t tracee) {
   char *sbxpath;
   if ((sbxpath = get_sbxpath(filename, -1)) == NULL) {
     return -ENOMEM;
@@ -427,7 +428,7 @@ static int sbx_open(char *filename, int flags, umode_t mode) {
 
   free(sbxpath);
 
-  if (add_to_descs(sbxpath, r, mode, r) != ERR_SUCCESS) {
+  if (add_to_descs(sbxpath, r, mode, r, tracee) != ERR_SUCCESS) {
     return -ENOMEM;
   }
 
@@ -651,7 +652,7 @@ static enum error_e _trace(unsigned long long int sc, struct user_regs_struct us
 	  return ERR_PTRACE_PEEKTEXT;
 	}
 
-	last_ret = sbx_openat(user_regs.rdi, filename, user_regs.rdx, user_regs.r10);
+	last_ret = sbx_openat(user_regs.rdi, filename, user_regs.rdx, user_regs.r10, tracee);
 
 	free(filename);
 
@@ -685,7 +686,7 @@ static enum error_e _trace(unsigned long long int sc, struct user_regs_struct us
 	  return ERR_PTRACE_PEEKTEXT;
 	}
 
-	last_ret = sbx_open(filename, user_regs.rsi, user_regs.rdx);
+	last_ret = sbx_open(filename, user_regs.rsi, user_regs.rdx, tracee);
 
 	free(filename);
 
@@ -811,18 +812,18 @@ enum error_e trace(pid_t tracee, _Bool is_root_proc, struct descs_s *parent_desc
     /* isolate stdin, stdout, and stderr for the tracee */
     int eval = open("sbx/proc/self/fd/0", O_RDONLY);
     if (eval == -1) { r = ERR_OPENSTDIN; goto cleanup; }
-    r = add_to_descs("sbx/proc/self/fd/0", 0, O_RDONLY, eval);
+    r = add_to_descs("sbx/proc/self/fd/0", 0, O_RDONLY, eval, tracee);
     if (r) goto cleanup;
 
     eval = open("sbx/proc/self/fd/1", O_WRONLY);
     if (eval == -1) { r = ERR_OPENSTDOUT; goto cleanup; }
   
-    r = add_to_descs("sbx/proc/self/fd/1", 1, O_WRONLY, eval);
+    r = add_to_descs("sbx/proc/self/fd/1", 1, O_WRONLY, eval, tracee);
     if (r) goto cleanup;
 
     eval = open("sbx/proc/self/fd/2", O_WRONLY);
     if (eval == -1) { r = ERR_OPENSTDERR; goto cleanup; }
-    r = add_to_descs("sbx/proc/self/fd/2", 2, O_WRONLY, eval);
+    r = add_to_descs("sbx/proc/self/fd/2", 2, O_WRONLY, eval, tracee);
     if (r) goto cleanup;
   }
 
